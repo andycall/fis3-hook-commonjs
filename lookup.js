@@ -1,6 +1,18 @@
 var path = require('path');
 var inited = false;
 var root, baseUrl, pkgs, paths, opts;
+var moitJsExtension;
+
+function getJsExtensionMoited() {
+  if (typeof moitJsExtension === 'undefined') {
+    var testFile = fis.file(fis.project.getProjectPath() + '/test.js');
+    // console.log(testFile);
+
+    moitJsExtension = testFile.id !== testFile.moduleId;
+  }
+
+  return moitJsExtension;
+}
 
 // find package base on folder name
 // 根据目录位置查找是否属于某个 package 配置
@@ -28,12 +40,27 @@ function isFISID(filepath) {
 }
 
 // 当 require 没有指定后缀时，用来根据后缀查找模块定义。
-function findResource(name, path, extList) {
-  var info = fis.uri(name, path);
-
-  for (var i = 0, len = extList.length; i < len && !info.file; i++) {
-    info = fis.uri(name + extList[i], path);
+function findResource(name, filepath, extList) {
+  var candidates = [name, path.join(name, 'index')];
+  var baseName = path.basename(name);
+  if (baseName && baseName !== '.' && baseName !== '..') {
+    candidates.push(path.join(name, baseName));
   }
+  var info = null;
+
+  candidates.every(function(candidate) {
+    info = fis.uri(candidate, filepath);
+
+    for (var i = 0, len = extList.length; i < len && !info.file; i++) {
+      info = fis.uri(candidate + extList[i], filepath);
+    }
+
+    if (info && info.file) {
+      return false;
+    }
+
+    return true;
+  });
 
   return info;
 }
@@ -73,7 +100,7 @@ function tryBaseUrlLookUp(info, file, opts) {
   }
 }
 
-// 基于 BaseUrl 查找
+// 基于 Root 查找
 function tryRootLookUp(info, file, opts) {
   return findResource(info.rest, root, opts.extList);
 }
@@ -133,7 +160,7 @@ function tryPackagesLookUp(info, file, opts) {
     if (pkg) {
       if (pkg.isFISID) {
         info.isFISID = true;
-        info.id = path.join(pkg.folder, subpath || pkg.main || 'main');
+        info.id = path.join(pkg.folder, subpath || pkg.main || 'main').replace(/\\/g, '/');
         if (!/\.[^\.]+$/.test(info.id)) {
           info.id += '.js';
         }
@@ -145,57 +172,15 @@ function tryPackagesLookUp(info, file, opts) {
   }
 }
 
-module.exports = function(info, file, silent) {
+var lookup = module.exports = function(info, file, silent) {
   if (!inited) {
     throw new Error('Please make sure init is called before this.');
   }
 
   var originPath = info.rest;
+  var lookupList = lookup.lookupList || [];
 
-  [
-    tryFisIdLookUp,
-    tryPathsLookUp,
-    tryPackagesLookUp,
-    tryFolderLookUp,
-    tryNoExtLookUp,
-    tryBaseUrlLookUp,
-    tryRootLookUp,
-
-    function(info) {
-      info.rest = path.join(originPath, 'index');
-      return info;
-    },
-
-    tryPathsLookUp,
-    tryPackagesLookUp,
-    tryFolderLookUp,
-    tryNoExtLookUp,
-    tryBaseUrlLookUp,
-    tryRootLookUp,
-
-    function(info) {
-      var basename = path.basename(originPath);
-      if (!basename) {
-        return false;
-      }
-
-      info.rest = path.join(originPath, basename);
-      return info;
-    },
-
-    tryPathsLookUp,
-    tryPackagesLookUp,
-    tryFolderLookUp,
-    tryNoExtLookUp,
-    tryBaseUrlLookUp,
-    tryRootLookUp,
-
-    function(info) {
-      info.rest = originPath;
-      return info;
-    }
-  ].every(function(finder) {
-
+  lookupList.every(function(finder) {
     if (info.file) {
       return false;
     }
@@ -216,14 +201,48 @@ module.exports = function(info, file, silent) {
   // if (!silent && (!info.file || !info.moduleId)) {
   //   fis.log.warn('Can\'t find resource %s', info.rest.red);
   // }
+  //
+
+
+  // 跨模块引用 js
+  if (info.isFISID && !info.file && (/\.js$/.test(info.rest) || !/\.\w+$/.test(info.rest))) {
+    info.id = info.rest;
+    var mod = getJsExtensionMoited();
+
+    // 只有在省略后缀的模式下才启用。
+    if (mod) {
+      info.moduleId = info.id.replace(/\.js$/, '');
+      info.id = info.moduleId + '.js';
+    }
+  }
 
   return info;
 }
 
+lookup.lookupList = [
+  tryFisIdLookUp,
+  tryPathsLookUp,
+  tryPackagesLookUp,
+  tryFolderLookUp,
+  tryNoExtLookUp,
+  tryBaseUrlLookUp,
+  tryRootLookUp
+];
+
+lookup.tryFisIdLookUp = tryFisIdLookUp;
+lookup.tryPathsLookUp = tryPathsLookUp;
+lookup.tryPackagesLookUp = tryPackagesLookUp;
+lookup.tryFolderLookUp = tryFolderLookUp;
+lookup.tryNoExtLookUp = tryNoExtLookUp;
+lookup.tryBaseUrlLookUp = tryBaseUrlLookUp;
+lookup.tryRootLookUp = tryRootLookUp;
+
+lookup.findResource = findResource;
+
 /**
  * 初始化 lookup
  */
-module.exports.init = function(fis, conf) {
+lookup.init = function(fis, conf) {
   inited = true;
   opts = conf;
   root = fis.project.getProjectPath();
